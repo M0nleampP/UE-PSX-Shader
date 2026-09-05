@@ -73,15 +73,17 @@ return UV + float2(ox / ScreenSize.x, oy / ScreenSize.y);
 
 说明：基于屏幕像素位置的 cheap-noise，为 UV 添加像素级小偏移以模拟 PSX 顶点精度导致的抖动。
 
-5) （可选）SampleSceneAtUV (输出 float4)
+5) SampleSceneAtUV (输出 float4) — UE5.8 推荐实现
 Inputs: UV (float2)
 
 ```hlsl
-// 在某些版本中可以：
-return SceneTextureLookup(UV, 14); // 14 = PostProcessInput0 （引擎版本差异）
+// In UE5.8 Post-Process Custom nodes, SceneTextureLookup is available.
+// Use the PostProcessInput0 ID for the second parameter. If your build errors,
+// fall back to the built-in SceneTexture node in the Material Editor.
+return SceneTextureLookup(UV, 14);
 ```
 
-说明：在 Custom 里直接调用 SceneTextureLookup 在不同 UE 版本中可能不可用；若不可用，用材质编辑器内置 SceneTexture(PostProcessInput0)节点并把 UV 运算后的结果连到其 UV 输入。
+说明：在 Custom 里直接调用 SceneTextureLookup 可按任意 UV 采样场景纹理（在 UE5.8 的 Post Process 材质中通常可用）。如果编译器报错，改用材质编辑器内置的 SceneTexture (PostProcessInput0) 节点并将 UV 运算连接到该节点的 UV 输入（若该节点在你的版本中无 UV 输入，参考下面的 Render Target 备选方案）。
 
 ## 主流程（节点连线）
 1. ScreenPosition 节点（取 .xy） => 原始 UV
@@ -89,21 +91,33 @@ return SceneTextureLookup(UV, 14); // 14 = PostProcessInput0 （引擎版本差�
    - UV_W = ScreenWobble(UV, ScreenSize, WobbleStrength)
    else UV_W = UV
 3. UV_Low = NearestLowResUV(UV_W, LowRes)
-4. ColRGBA = SceneTexture(PostProcessInput0) sampled at UV_Low
+4. ColRGBA = SampleSceneAtUV(UV_Low)   // 或用 SceneTexture(PostProcessInput0) 节点
 5. Col = ColRGBA.rgb
 6. Col_Q = QuantizeColor(Col, ColorLevels)
 7. PixelPos = floor(UV_W * ScreenSize) => pass to BayerDither => d = BayerDither * (1.0 / ColorLevels) * DitherStrength
 8. OutColor = saturate(Col_Q + d)
 9. 连接 OutColor 到 Emissive Color 输出（Alpha = 1）
 
-## 注意事项与可选优化
-- 精确 nearest 采样：材质内对 UV 做 floor 近似 nearest-downsample，但若想保证点过滤（Point）与最准确的像素对齐，建议在引擎中额外创建一个低分辨率 Render Target（比如 320x240），把场景渲染到该 RT（设置 Texture Filter = Point），然后在后处理里直接采样该 RT。代价更高但结果更一致。
-- 若 SceneTextureLookup / SceneTexture 节点无法按预期工作，请告知你的 UE 版本，我会提供针对该版本的替代实现。
-- 若想更真实地模拟“无透视贴图插值（affine）”的外观，需要在顶点阶段对 clip-space 顶点做 snap（vertex-snapping），这需要引擎层面的自定义 shader 或把 WorldPositionOffset 作为近似实现——那属于高级方案，不在本 README 的后处理单 pass 范围内。
+## UE5.8 额外兼容提示
+- SceneTextureLookup 的枚举值（第二参数）在历史上有变化，但在 UE5.x 系列中 14 常用作 PostProcessInput0。若 Custom 节点提示未定义函数或采样异常，请改为：
+  - 在材质里使用 SceneTexture 节点（选择 PostProcessInput0），并通过 ScreenPosition 进行采样；或
+  - 创建一个低分辨率 Render Target（例如 320x240，Point filter），把场景先渲染到该 RT（使用一个简单的全屏后处理把 PostProcessInput0 复制到 RT），然后在最终后处理材质中采样该 RT（此方式能保证点过滤与完全可控的采样）。
 
-## 在游戏中设置 ScreenSize
-建议在 BeginPlay 或每次分辨率变化时通过 Blueprint 更新材质实例参数：
-- 在 BP 的 BeginPlay 中使用 `Get Viewport Size`，然后 `Set Vector Parameter Value`（ScreenSize）到材质实例。
+## Blueprint：在运行时设置 ScreenSize（示例步骤）
+1. 在你的主场景 Blueprint（例如 GameMode / PlayerController / 一个全局 Manager）里，在 BeginPlay 执行：
+   - Get GameViewport -> GetViewportSize (Outputs: X, Y)
+   - Create Dynamic Material Instance (Target: the Post Process Material you制作)
+   - Set Vector Parameter Value (Material Instance, Parameter Name = "ScreenSize", Value = MakeVector(X, Y, 0))
+
+示例伪节点流程：
+- Event BeginPlay -> Get GameViewport -> GetViewportSize -> CreateDynamicMaterialInstance -> SetVectorParameterValue(ScreenSize <- X,Y)
+
+## 精确 nearest 采样的备选方案（更稳妥）
+1. 创建一个低分辨率 Render Target（例如 320x240），Texture Filter = Point。
+2. 在一个高优先级的后处理（或自定义渲染通道）里把当前 SceneTexture (PostProcessInput0) 画到该 RT（使用 DrawTexture 或一个简单材质复制）。
+3. 在你的最终后处理材质中采样这个 RT（它是一个普通的纹理采样节点，可以使用 Point filter），然后对其进行量化与抖动处理。
+
+此方案最能保证 PSX 像素块感，但会略增成本（额外的 RT 和一次复制）。
 
 ## 推荐起始参数
 - LowRes = (320,240)
@@ -114,7 +128,8 @@ return SceneTextureLookup(UV, 14); // 14 = PostProcessInput0 （引擎版本差�
 ---
 
 如果你愿意，我可以：
-- 把一个完整的 Material Instance 和示例 Blueprint 添加到仓库（需要 UE 内容导出或示例工程文件）；
-- 或者把后处理 + 可选 RenderTarget 实现的详细 Blueprint/步骤写成单独文档并提交。
+- 将一份 UE5.8 专用的 README 分节（当前已加入）再细化为一个单独文件（例如 UE5.8_NOTES.md），并提交到仓库；
+- 或者我可以把一个示例 Blueprint 文本文件（UAsset 非二进制，伪代码说明）提交到仓库，展示如何在 BP 中创建 Dynamic Material Instance 并设置 ScreenSize；
+- 或者我可以立即把示例低分辨率 Render Target 的步骤写成可执行的 Blueprint/Editor 操作并提交为文档。
 
-要我把 Material Asset / 示例 Blueprint 放进仓库吗？
+要我把哪一个（或多个）加到仓库？
