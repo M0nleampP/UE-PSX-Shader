@@ -126,10 +126,3 @@ return SceneTextureLookup(UV, 14);
 - DitherStrength = 1.0
 
 ---
-
-如果你愿意，我可以：
-- 将一份 UE5.8 专用的 README 分节（当前已加入）再细化为一个单独文件（例如 UE5.8_NOTES.md），并提交到仓库；
-- 或者我可以把一个示例 Blueprint 文本文件（UAsset 非二进制，伪代码说明）提交到仓库，展示如何在 BP 中创建 Dynamic Material Instance 并设置 ScreenSize；
-- 或者我可以立即把示例低分辨率 Render Target 的步骤写成可执行的 Blueprint/Editor 操作并提交为文档。
-
-要我把哪一个（或多个）加到仓库？
